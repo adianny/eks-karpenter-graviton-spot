@@ -1,0 +1,99 @@
+# ---------------------------------------------------------------------------
+# Example 3 — Say nothing about architecture and let Karpenter optimise
+#
+# This is the recommended default for a normal stateless service. By not
+# constraining the architecture, the pod becomes schedulable on both Graviton
+# and x86, which lets Karpenter pick the cheapest capacity available at that
+# moment — in practice, almost always arm64 Spot.
+#
+# The image must be a multi-arch manifest for this to work. Build yours with:
+#
+#   docker buildx build --platform linux/amd64,linux/arm64 \
+#     -t <account>.dkr.ecr.<region>.amazonaws.com/app:1.0.0 --push .
+#
+#   kubectl apply -f 03-multiarch-let-karpenter-choose.yaml
+#   kubectl get pods -l app=hello-multiarch -o wide
+#   kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-multiarch
+  labels:
+    app: hello-multiarch
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: hello-multiarch
+  template:
+    metadata:
+      labels:
+        app: hello-multiarch
+    spec:
+      # No nodeSelector at all — Karpenter is free to choose.
+      #
+      # If you want to *prefer* Graviton but still allow x86 when arm64
+      # capacity is short, express it as a soft preference instead of a
+      # hard selector:
+      #
+      # affinity:
+      #   nodeAffinity:
+      #     preferredDuringSchedulingIgnoredDuringExecution:
+      #       - weight: 100
+      #         preference:
+      #           matchExpressions:
+      #             - key: kubernetes.io/arch
+      #               operator: In
+      #               values: ["arm64"]
+      containers:
+        - name: app
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "arch=$(uname -m) node=${NODE_NAME}"
+              while true; do sleep 3600; done
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: hello-multiarch
+---
+# A PodDisruptionBudget is what makes running on Spot safe. When Karpenter
+# drains a node — either because Spot reclaimed it or because consolidation
+# found a cheaper shape — Kubernetes will refuse to go below this floor.
+#
+# Without a PDB, Spot is a gamble. With one, it is a discount.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: hello-multiarch
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: hello-multiarch

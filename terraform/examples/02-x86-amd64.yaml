@@ -1,0 +1,75 @@
+# ---------------------------------------------------------------------------
+# Example 2 — Run a workload on x86 (amd64)
+#
+# Identical to example 1 except for the architecture selector. Use this when a
+# dependency genuinely has no arm64 build — a vendor binary, a legacy wheel, a
+# proprietary agent. Everything else should default to Graviton.
+#
+#   kubectl apply -f 02-x86-amd64.yaml
+#   kubectl rollout status deploy/hello-x86
+#   kubectl logs -l app=hello-x86 --tail=5
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-x86
+  labels:
+    app: hello-x86
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-x86
+  template:
+    metadata:
+      labels:
+        app: hello-x86
+    spec:
+      # ----- x86 instead of Graviton -----
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      # -----------------------------------
+      containers:
+        - name: app
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "=========================================="
+              echo " Architecture : $(uname -m)"
+              echo " Node         : ${NODE_NAME}"
+              echo " Pod          : ${POD_NAME}"
+              echo "=========================================="
+              while true; do sleep 3600; done
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: hello-x86

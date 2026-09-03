@@ -1,0 +1,86 @@
+# ---------------------------------------------------------------------------
+# Example 1 — Run a workload on Graviton (arm64)
+#
+# The only line that matters is the nodeSelector: kubernetes.io/arch: arm64
+# Karpenter sees a pending pod that requires arm64, and provisions a Graviton
+# node for it. No node group to create, no capacity to reserve.
+#
+#   kubectl apply -f 01-graviton-arm64.yaml
+#   kubectl rollout status deploy/hello-graviton
+#   kubectl logs -l app=hello-graviton --tail=5
+#
+# The container prints its architecture, so you can see for yourself that it
+# really landed on arm64.
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-graviton
+  labels:
+    app: hello-graviton
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: hello-graviton
+  template:
+    metadata:
+      labels:
+        app: hello-graviton
+    spec:
+      # ----- this is the whole trick -----
+      nodeSelector:
+        kubernetes.io/arch: arm64
+      # -----------------------------------
+      containers:
+        - name: app
+          # Multi-arch image: the same tag resolves to an arm64 or amd64
+          # manifest depending on the node it is pulled onto.
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "=========================================="
+              echo " Architecture : $(uname -m)"
+              echo " Node         : ${NODE_NAME}"
+              echo " Pod          : ${POD_NAME}"
+              echo "=========================================="
+              # Keep the pod alive so it can be inspected
+              while true; do sleep 3600; done
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            # Requests are what Karpenter uses to size the node it launches.
+            # Getting these wrong is the most common cause of a cluster that
+            # costs more than it should.
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      # Spread replicas across AZs so losing one zone does not take the
+      # whole deployment with it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: hello-graviton

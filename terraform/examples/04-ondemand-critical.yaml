@@ -1,0 +1,61 @@
+# ---------------------------------------------------------------------------
+# Example 4 — Pin a workload to On-Demand capacity
+#
+# Spot is the right default for stateless work, but some things should never
+# be interrupted: a singleton job, a leader-elected controller, a migration
+# runner, anything holding state that is expensive to rebuild.
+#
+# Karpenter labels every node it launches with karpenter.sh/capacity-type,
+# so selecting On-Demand is a one-line change.
+#
+#   kubectl apply -f 04-ondemand-critical.yaml
+#   kubectl get pods -l app=critical-worker -o wide
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: critical-worker
+  labels:
+    app: critical-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: critical-worker
+  template:
+    metadata:
+      labels:
+        app: critical-worker
+    spec:
+      nodeSelector:
+        # ----- never place this pod on Spot -----
+        karpenter.sh/capacity-type: on-demand
+        # Still prefer Graviton for the price/performance win
+        kubernetes.io/arch: arm64
+        # ----------------------------------------
+      containers:
+        - name: worker
+          image: public.ecr.aws/docker/library/busybox:1.37
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "critical worker on $(uname -m), capacity=on-demand"
+              while true; do sleep 3600; done
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65534
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+      # Give the pod time to finish in-flight work when a node is drained.
+      terminationGracePeriodSeconds: 60
