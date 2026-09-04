@@ -1,0 +1,74 @@
+# ---------------------------------------------------------------------------
+# NodePool: critical
+#
+# On-Demand only, Graviton only. For workloads that cannot absorb an
+# interruption: singletons, leader-elected controllers, migration jobs,
+# anything holding state that is expensive to rebuild.
+#
+# A pod opts in explicitly:
+#
+#   nodeSelector:
+#     karpenter.sh/capacity-type: on-demand
+#
+# The lower weight means Karpenter only reaches for this pool when a pod's
+# constraints rule out the cheaper `general` pool.
+# ---------------------------------------------------------------------------
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: critical
+spec:
+  template:
+    metadata:
+      labels:
+        workload-class: critical
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      requirements:
+        # Graviton by default here too — uninterruptible does not have to mean
+        # expensive.
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["5"]
+
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["2", "4", "8", "16"]
+
+      expireAfter: 720h # 30 days — longer, since these hosts are disturbed less
+
+      terminationGracePeriod: 24h
+
+  limits:
+    cpu: {{ div .Values.cpuLimit 2 }}
+
+  disruption:
+    # Only reclaim genuinely empty nodes. Consolidation here would mean moving
+    # workloads that were explicitly placed to avoid being moved.
+    consolidationPolicy: WhenEmpty
+    consolidateAfter: 5m
+
+    budgets:
+      - nodes: "1"
+
+  weight: 10

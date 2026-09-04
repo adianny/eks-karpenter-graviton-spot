@@ -1,0 +1,103 @@
+# ---------------------------------------------------------------------------
+# NodePool: general
+#
+# This is the answer to the assignment's core requirement — a single pool that
+# can launch BOTH arm64 (Graviton) and amd64 (x86) instances.
+#
+# How the choice actually gets made:
+#   - A pod with no architecture constraint is schedulable on either. Karpenter
+#     prices the options and picks the cheapest that fits, which in practice is
+#     almost always Graviton Spot.
+#   - A pod with `nodeSelector: kubernetes.io/arch: arm64` narrows the set, and
+#     Karpenter launches Graviton.
+#   - Same with amd64. One pool, no separate infrastructure per architecture.
+#
+# Spot is listed first but that is not what makes it preferred — Karpenter
+# chooses on price using the price-capacity-optimized strategy, and Spot wins on
+# price. On-Demand stays in the list so that a Spot capacity shortage degrades
+# the bill, not the service.
+# ---------------------------------------------------------------------------
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: general
+spec:
+  template:
+    metadata:
+      labels:
+        workload-class: general
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: default
+
+      requirements:
+        # ---- BOTH ARCHITECTURES: the requirement, expressed literally ----
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64", "amd64"]
+        # ------------------------------------------------------------------
+
+        # Spot first for cost, On-Demand retained as fallback capacity.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+
+        # General-purpose, compute- and memory-optimised families. A wide list
+        # is deliberate: Spot interruption risk drops sharply the more distinct
+        # capacity pools Karpenter can draw from.
+        - key: karpenter.k8s.aws/instance-category
+          operator: In
+          values: ["c", "m", "r"]
+
+        # Current generations only - newer families are cheaper per unit of
+        # work and support the features assumed here.
+        - key: karpenter.k8s.aws/instance-generation
+          operator: Gt
+          values: ["5"]
+
+        # Avoid one- and two-vCPU instances: kubelet and the DaemonSets eat a
+        # disproportionate share of a tiny node.
+        - key: karpenter.k8s.aws/instance-cpu
+          operator: In
+          values: ["2", "4", "8", "16", "32"]
+
+        - key: karpenter.k8s.aws/instance-hypervisor
+          operator: In
+          values: ["nitro"]
+
+      # Recycle nodes on a schedule so no instance drifts far from its AMI.
+      # This is patching by replacement, which is the only patching model that
+      # actually holds on immutable hosts.
+      expireAfter: 336h # 14 days
+
+      terminationGracePeriod: 24h
+
+  limits:
+    cpu: {{ .Values.cpuLimit }}
+
+  disruption:
+    # WhenEmptyOrUnderutilized is what turns Karpenter from an autoscaler into
+    # a cost optimiser: it actively replaces nodes with cheaper shapes and
+    # consolidates workloads, rather than only removing empty nodes.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 1m
+
+    budgets:
+      # Never voluntarily disrupt more than 10% of nodes at once.
+      - nodes: "10%"
+      # And never voluntarily at all during business hours — Karpenter should
+      # not be reshuffling the fleet while traffic is at its peak. Involuntary
+      # Spot reclamation is unaffected; this governs Karpenter's own choices.
+      - nodes: "0"
+        schedule: "0 9 * * mon-fri"
+        duration: 9h
+
+  # Higher weight than `critical`, so this pool is considered first and the
+  # more expensive On-Demand pool is only used by pods that explicitly ask.
+  weight: 100

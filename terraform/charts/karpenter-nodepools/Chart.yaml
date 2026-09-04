@@ -1,0 +1,6 @@
+apiVersion: v2
+name: karpenter-nodepools
+description: EC2NodeClass and NodePools for multi-architecture (Graviton + x86) Spot-first capacity
+type: application
+version: 1.0.0
+appVersion: "1.0.0"

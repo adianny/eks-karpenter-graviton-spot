@@ -1,0 +1,6 @@
+# All values are supplied by Terraform; these defaults exist so the chart can
+# be linted and rendered standalone.
+clusterName: ""
+nodeIamRoleName: ""
+discoveryTag: ""
+cpuLimit: 100

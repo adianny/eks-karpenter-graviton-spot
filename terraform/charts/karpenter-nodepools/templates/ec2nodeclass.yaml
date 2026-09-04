@@ -1,0 +1,65 @@
+# ---------------------------------------------------------------------------
+# EC2NodeClass — the AWS-specific half of Karpenter's configuration.
+#
+# The NodePool decides *what shape* of node to launch; the EC2NodeClass decides
+# *how it is built on AWS*: which AMI, which subnets, which security groups,
+# which IAM role, what the disk looks like.
+# ---------------------------------------------------------------------------
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: default
+spec:
+  # Bottlerocket: purpose-built container host. Read-only root filesystem, no
+  # shell, no package manager, atomic updates. Materially smaller attack
+  # surface than a general-purpose Linux AMI.
+  #
+  # The alias resolves per-architecture automatically, so one EC2NodeClass
+  # serves both Graviton and x86 nodes.
+  amiSelectorTerms:
+    - alias: bottlerocket@latest
+
+  role: {{ .Values.nodeIamRoleName | quote }}
+
+  # Discovery by tag rather than by hardcoded IDs: the subnets and security
+  # groups are tagged in Terraform, so this configuration survives a VPC
+  # rebuild without edits.
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.discoveryTag | quote }}
+
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: {{ .Values.discoveryTag | quote }}
+
+  # Tags applied to every instance Karpenter launches - needed for cost
+  # allocation, and for knowing which instances are Karpenter's.
+  tags:
+    karpenter.sh/discovery: {{ .Values.discoveryTag | quote }}
+    ManagedBy: karpenter
+    Cluster: {{ .Values.clusterName | quote }}
+
+  # IMDSv2 required, and a hop limit of 1 so a compromised container cannot
+  # reach the instance metadata service to steal the node role credentials.
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 4Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+    # Bottlerocket keeps images and container state on a second volume.
+    - deviceName: /dev/xvdb
+      ebs:
+        volumeSize: 60Gi
+        volumeType: gp3
+        iops: 3000
+        throughput: 125
+        encrypted: true
+        deleteOnTermination: true
