@@ -14,7 +14,7 @@ override.tf.json
 *_override.tf.json
 .terraformrc
 terraform.rc
-.terraform.lock.hcl
+# .terraform.lock.hcl is intentionally committed - it pins provider hashes
 
 # Local
 .DS_Store
