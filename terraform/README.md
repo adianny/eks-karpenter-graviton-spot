@@ -111,6 +111,84 @@ cp terraform.tfvars.example terraform.tfvars
 
 ---
 
+## Tests
+
+The repository ships a test suite written with Terraform's native
+[test framework](https://developer.hashicorp.com/terraform/language/tests).
+
+```bash
+terraform test
+```
+
+```
+tests/karpenter.tftest.hcl... pass
+tests/network.tftest.hcl... pass
+tests/variables.tftest.hcl... pass
+
+Success! 17 passed, 0 failed.
+```
+
+Every test uses `mock_provider`, so the suite **runs offline, needs no AWS
+credentials and creates nothing**. That is deliberate: a test suite that costs
+money or requires a live account is a test suite that stops being run.
+
+| File | What it protects |
+|---|---|
+| `tests/variables.tftest.hcl` | Input validation — rejects invalid names, malformed CIDRs, single-AZ deployments; asserts the defaults have not drifted |
+| `tests/network.tftest.hcl` | Subnet arithmetic — tier sizing, no overlap between tiers, and that the maths follows `vpc_cidr` instead of assuming `10.0.0.0/16` |
+| `tests/karpenter.tftest.hcl` | Node strategy — system node group stays Graviton and small, Karpenter version is an exact pin compatible with K8s 1.36, capacity has a ceiling, and the production posture is reachable by variable |
+
+The addressing tests get the most attention because that failure is silent. An
+undersized private tier does not break the apply; it breaks months later when
+pods stop receiving IP addresses, and by then the fix is a cluster rebuild.
+
+Run a single file with:
+
+```bash
+terraform test -filter=tests/network.tftest.hcl
+```
+
+<details>
+<summary>Running this in CI</summary>
+
+The repository root is limited to `terraform/` and `architecture/` as the
+assignment requires, so no workflow directory is included. This is the job
+that would go in one:
+
+```yaml
+name: terraform
+on: [push, pull_request]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.x
+
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false
+      - run: terraform validate
+      - run: terraform test          # no credentials needed - all mocked
+
+      - uses: bridgecrewio/checkov-action@master
+        with:
+          directory: terraform
+          framework: terraform
+```
+
+No AWS credentials are required for any step, which means the whole suite can
+run on pull requests from forks.
+
+</details>
+
+---
+
 ## Running a pod on Graviton or x86
 
 This is the part the cluster exists for. Ready-to-apply manifests are in
