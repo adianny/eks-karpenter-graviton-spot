@@ -123,6 +123,12 @@ resource "helm_release" "karpenter_nodepools" {
     cpuLimit        = var.node_cpu_limit
   })]
 
+  # Removing a NodePool makes Karpenter cordon, drain and terminate every node
+  # it owns, one disruption budget at a time. On a busy cluster that comfortably
+  # exceeds Helm's five-minute default and fails the destroy halfway through,
+  # leaving the VPC undeletable because instances are still attached to it.
+  timeout = 900
+
   # The CRDs ship with the controller chart, so they must exist first.
   depends_on = [helm_release.karpenter]
 }

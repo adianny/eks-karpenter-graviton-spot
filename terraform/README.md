@@ -431,6 +431,11 @@ Deleting Karpenter-managed nodes before `terraform destroy` matters: Terraform
 does not know about instances Karpenter created, and orphaned nodes will block
 VPC deletion.
 
+Terraform then removes the NodePools, which makes Karpenter drain anything
+still running — a step given a 15-minute Helm timeout rather than the default
+five, because it is paced by the same disruption budgets that govern normal
+consolidation and will otherwise abort midway, leaving the VPC undeletable.
+
 ---
 
 ## Layout
