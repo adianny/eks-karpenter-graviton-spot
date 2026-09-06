@@ -91,9 +91,15 @@ spec:
     budgets:
       # Never voluntarily disrupt more than 10% of nodes at once.
       - nodes: "10%"
-      # And never voluntarily at all during business hours — Karpenter should
-      # not be reshuffling the fleet while traffic is at its peak. Involuntary
+      # And never voluntarily at all during the daily traffic peak — Karpenter
+      # should not be reshuffling the fleet while it is busiest. Involuntary
       # Spot reclamation is unaffected; this governs Karpenter's own choices.
+      #
+      # The schedule is UTC. Karpenter states this explicitly in the NodePool
+      # CRD - "Timezones are not supported" - so a window written to look like
+      # local office hours silently lands somewhere else, and moves again when
+      # daylight saving does. Pin it to the measured traffic peak in UTC rather
+      # than to anybody's working day.
       - nodes: "0"
         schedule: "0 9 * * mon-fri"
         duration: 9h

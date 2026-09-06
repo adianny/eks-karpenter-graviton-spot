@@ -292,7 +292,7 @@ graph TB
 | NodePool | Architectures | Capacity | Purpose |
 |---|---|---|---|
 | `general` | `arm64` (preferred) + `amd64` | Spot, On-Demand fallback | Stateless API and workers |
-| `critical` | `arm64` | On-Demand only | Anything that cannot tolerate interruption |
+| `critical` | `arm64` (preferred) + `amd64` | On-Demand only | Anything that cannot tolerate interruption |
 
 The technical task in [`../terraform/`](../terraform/) implements exactly this NodePool, so the design and the code in this repository agree.
 
