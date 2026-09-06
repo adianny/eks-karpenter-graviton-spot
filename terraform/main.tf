@@ -155,6 +155,17 @@ module "eks" {
     resources = ["secrets"]
   }
 
+  # ARC zonal shift. When AWS reports an impaired Availability Zone, traffic is
+  # moved away from it automatically. This has to be enabled on the cluster
+  # itself, not only in Karpenter: the controller calls GetManagedResource at
+  # startup and refuses to run against a cluster that is not registered, which
+  # is the correct behaviour - it will not pretend to respect a shift it cannot
+  # observe. Registering here is what lets Karpenter stop provisioning into a
+  # zone that is being drained.
+  zonal_shift_config = {
+    enabled = true
+  }
+
   addons = {
     coredns    = {}
     kube-proxy = {}
@@ -177,8 +188,22 @@ module "eks" {
       before_compute = true
     }
 
-    aws-ebs-csi-driver = {}
-    metrics-server     = {}
+    metrics-server = {}
+
+    # Deliberately not installed: aws-ebs-csi-driver.
+    #
+    # Nothing here claims a PersistentVolume, and the driver's controller needs
+    # its own IAM identity to talk to the EBS API - without one it sits in
+    # CrashLoopBackOff and the add-on never reports ACTIVE, which fails the
+    # apply on a cluster that is otherwise healthy. When stateful workloads
+    # arrive, add it back together with the role it needs:
+    #
+    #   aws-ebs-csi-driver = {
+    #     pod_identity_association = [{
+    #       role_arn        = aws_iam_role.ebs_csi.arn   # AmazonEBSCSIDriverPolicy
+    #       service_account = "ebs-csi-controller-sa"
+    #     }]
+    #   }
   }
 
   vpc_id                   = module.vpc.vpc_id
@@ -204,6 +229,21 @@ module "eks" {
         # Karpenter's own pods are pinned here via nodeSelector, guaranteeing
         # the controller never runs on a node it manages.
         "karpenter.sh/controller" = "true"
+      }
+
+      # Reserve this group for cluster-critical components. Without the taint,
+      # application pods land here whenever it happens to have room - which
+      # silently defeats the whole point: workloads end up on fixed On-Demand
+      # capacity instead of the Spot capacity Karpenter would have bought them.
+      #
+      # CriticalAddonsOnly is the conventional key precisely because CoreDNS,
+      # metrics-server and the Karpenter chart all tolerate it out of the box.
+      taints = {
+        critical_addons_only = {
+          key    = "CriticalAddonsOnly"
+          value  = "true"
+          effect = "NO_SCHEDULE"
+        }
       }
     }
   }
