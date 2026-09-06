@@ -33,6 +33,15 @@ module "karpenter" {
     AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
   }
 
+  # The controller policy is genuinely larger than the 6,144-character ceiling
+  # AWS puts on a customer managed policy, so creating it that way fails with
+  # `LimitExceeded: Cannot exceed quota for PolicySize: 6144`. An inline role
+  # policy has a 10,240-character limit and holds it comfortably. It is also
+  # the better fit conceptually: this policy is meaningless detached from this
+  # one role, so there is nothing to gain from it being independently
+  # attachable.
+  enable_inline_policy = true
+
   tags = local.tags
 }
 
