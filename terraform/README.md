@@ -20,7 +20,7 @@ graph TB
             NAT["NAT Gateway"]
         end
         subgraph priv["Private subnets — karpenter.sh/discovery"]
-            SYS["Managed node group 'system'<br/>2 × m7g.large · Bottlerocket ARM<br/><i>Karpenter controller lives here</i>"]
+            SYS["Managed node group 'system'<br/>2 × m7g.large · Bottlerocket ARM<br/>taint: CriticalAddonsOnly<br/><i>Karpenter controller lives here</i>"]
             GEN["NodePool: general<br/>arm64 + amd64 · Spot → On-Demand"]
             CRIT["NodePool: critical<br/>On-Demand only"]
         end
@@ -50,11 +50,12 @@ graph TB
 |---|---|---|
 | Kubernetes | EKS `1.36` | Latest available; configurable via `kubernetes_version` |
 | Node OS | Bottlerocket | Read-only root, no shell, atomic updates — smaller attack surface than a general-purpose AMI |
-| System capacity | 2 × `m7g.large` On-Demand | Karpenter cannot provision the node it runs on; this is the stable floor |
+| System capacity | 2 × `m7g.large` On-Demand, tainted | Karpenter cannot provision the node it runs on; this is the stable floor, reserved for cluster-critical pods |
 | Workload capacity | Karpenter, Spot-first | Cheapest instance that fits, chosen per pod |
 | Architectures | arm64 **and** amd64 | One NodePool serves both |
 | Controller identity | **EKS Pod Identity** | Current mechanism; no OIDC trust policy to maintain |
 | Spot safety | SQS interruption queue | Nodes drain gracefully on the 2-minute warning |
+| AZ impairment | ARC zonal shift, enabled on the cluster | Karpenter stops provisioning into a zone AWS reports as degraded |
 
 ---
 
@@ -194,6 +195,18 @@ run on pull requests from forks.
 This is the part the cluster exists for. Ready-to-apply manifests are in
 [`examples/`](./examples/).
 
+Everything below is real output from a deployed cluster, not an illustration.
+The starting point is a cluster with **no Karpenter capacity at all** — just the
+two-node system group, which is tainted `CriticalAddonsOnly` so application
+pods cannot land on it:
+
+```
+$ kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type
+NAME                                        STATUS   VERSION               ARCH    CAPACITY-TYPE
+ip-10-0-30-242.eu-west-1.compute.internal   Ready    v1.36.1-eks-a3a0722   arm64
+ip-10-0-39-216.eu-west-1.compute.internal   Ready    v1.36.1-eks-a3a0722   arm64
+```
+
 ### On Graviton (arm64)
 
 One line does it:
@@ -206,22 +219,29 @@ spec:
 
 ```bash
 kubectl apply -f examples/01-graviton-arm64.yaml
-kubectl rollout status deploy/hello-graviton
+kubectl wait --for=condition=Available deploy/hello-graviton --timeout=6m
 ```
 
-Karpenter sees a pod it cannot schedule, works out that it needs arm64,
-launches a Graviton instance, and the pod starts — typically in under a minute.
+Karpenter sees a pod it cannot schedule, works out that it needs arm64, launches
+a Graviton instance and the pod starts. From `apply` to `Available`:
+
+```
+deployment.apps/hello-graviton condition met
+
+real	0m29.277s
+```
+
 The container prints its own architecture, so you can check rather than assume:
 
 ```bash
-kubectl logs -l app=hello-graviton --tail=5
+kubectl logs -l app=hello-graviton --tail=6
 ```
 
 ```
 ==========================================
  Architecture : aarch64          ← Graviton
- Node         : ip-10-0-40-133.eu-west-1.compute.internal
- Pod          : hello-graviton-7d4c8f9b6-x2mkp
+ Node         : ip-10-0-46-11.eu-west-1.compute.internal
+ Pod          : hello-graviton-7f9fdcd576-frphv
 ==========================================
 ```
 
@@ -237,12 +257,25 @@ spec:
 
 ```bash
 kubectl apply -f examples/02-x86-amd64.yaml
-kubectl logs -l app=hello-x86 --tail=5
+kubectl wait --for=condition=Available deploy/hello-x86 --timeout=6m
+kubectl logs -l app=hello-x86 --tail=6
 ```
 
 ```
- Architecture : x86_64
+deployment.apps/hello-x86 condition met
+
+real	0m26.503s
 ```
+
+```
+==========================================
+ Architecture : x86_64
+ Node         : ip-10-0-21-98.eu-west-1.compute.internal
+ Pod          : hello-x86-d79995b56-hx82c
+==========================================
+```
+
+Nothing changed between the two runs except the value of one label.
 
 ### Better still: say nothing
 
@@ -278,8 +311,42 @@ kubectl apply -f examples/04-ondemand-critical.yaml
 ### Seeing what Karpenter did
 
 ```bash
-kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type,node.kubernetes.io/instance-type
+kubectl get nodes -L kubernetes.io/arch,karpenter.sh/capacity-type,node.kubernetes.io/instance-type,topology.kubernetes.io/zone
 ```
+
+After the two deployments above, from the same cluster:
+
+```
+NAME                                        AGE   ARCH    CAPACITY-TYPE   INSTANCE-TYPE    ZONE
+ip-10-0-19-136.eu-west-1.compute.internal   55s   arm64   spot            c6g.large        eu-west-1b
+ip-10-0-46-11.eu-west-1.compute.internal    56s   arm64   spot            c6g.large        eu-west-1c
+ip-10-0-21-98.eu-west-1.compute.internal    20s   amd64   spot            c8i.large        eu-west-1b
+ip-10-0-32-51.eu-west-1.compute.internal    19s   amd64   spot            c8i-flex.large   eu-west-1c
+ip-10-0-30-242.eu-west-1.compute.internal   50m   arm64                   m7g.large        eu-west-1b
+ip-10-0-39-216.eu-west-1.compute.internal   50m   arm64                   m7g.large        eu-west-1c
+```
+
+Four nodes appeared, all of them Spot, spread across two Availability Zones, in
+both architectures. The two without a capacity type are the On-Demand system
+group. Karpenter also picked three different instance types unprompted —
+`c6g.large`, `c8i.large`, `c8i-flex.large` — because the NodePool constrains
+CPU generation and size rather than naming instance types, which is what lets it
+find capacity when a specific type is unavailable or expensive.
+
+```bash
+kubectl get nodeclaims
+```
+
+```
+NAME            TYPE             CAPACITY   ZONE         READY   AGE
+general-4h22t   c6g.large        spot       eu-west-1c   True    70s
+general-clb5n   c6g.large        spot       eu-west-1b   True    70s
+general-nfflp   c8i.large        spot       eu-west-1b   True    33s
+general-nz7vh   c8i-flex.large   spot       eu-west-1c   True    33s
+```
+
+Delete the deployments and the four nodes are consolidated away on their own,
+back to the two system nodes.
 
 | Selector | Result |
 |---|---|
@@ -408,8 +475,51 @@ at *plan* time, so it cannot manage a CRD that will not exist until *apply*.
 Shipping the manifests as a small local chart means the entire stack — cluster,
 controller and NodePools — comes up in one `terraform apply`.
 
+**Why the system node group is tainted.** `CriticalAddonsOnly=true:NoSchedule`.
+Without it, application pods land on the system group whenever it happens to
+have room, which quietly defeats the point — workloads end up on fixed On-Demand
+capacity instead of the Spot capacity Karpenter would have bought them. That key
+is conventional precisely because CoreDNS, metrics-server and the Karpenter
+chart all tolerate it by default.
+
+**Why zonal shift is enabled on the cluster.** Karpenter is configured to
+respect ARC zonal shift, so when AWS reports an impaired Availability Zone it
+stops provisioning into it. That requires registering the cluster, not just
+setting the flag — the controller calls `GetManagedResource` at startup and
+refuses to run against an unregistered cluster rather than silently ignoring
+shifts it cannot observe.
+
+**Why there is no EBS CSI driver.** Nothing here claims a PersistentVolume, and
+the driver's controller needs its own IAM identity to reach the EBS API. The
+add-on block in `main.tf` carries the exact `pod_identity_association` needed to
+add it back when a stateful workload arrives.
+
 **What would change for production.** Remote state with locking (the backend
 block is present but commented), `single_nat_gateway = false`,
 `endpoint_public_access_cidrs` narrowed to known ranges, an external secrets
 operator, and a policy engine such as Kyverno enforcing Pod Security Standards
 and image provenance.
+
+---
+
+## What running it actually surfaced
+
+Three things only a real apply could find. They are worth stating because each
+one changed the code above.
+
+**The Karpenter controller policy does not fit in a managed IAM policy.** It
+fails with `LimitExceeded: Cannot exceed quota for PolicySize: 6144`. An inline
+role policy allows 10,240 characters, hence `enable_inline_policy = true`. It is
+also the better fit conceptually: that policy is meaningless detached from that
+one role, so there is nothing to gain from making it independently attachable.
+
+**Karpenter panics at startup if `enableZonalShift` is set on a cluster that is
+not registered for it.** Not a permissions problem — the IAM policy already
+grants the read actions. This is the fix described above, and the reason the
+setting appears in two places rather than one.
+
+**An EKS add-on with no IAM identity fails the whole apply, twenty minutes
+later.** The EBS CSI controller sat in `CrashLoopBackOff`, so the add-on never
+reported `ACTIVE` and Terraform timed out waiting on a cluster that was
+otherwise healthy. Add-ons that call AWS APIs need their identity created in the
+same breath as the add-on itself.
